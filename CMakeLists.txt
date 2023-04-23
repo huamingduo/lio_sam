@@ -84,6 +84,15 @@ set(GTSAM_LIBRARIES
   lz4
 )
 
+add_executable(front_end
+  src/refactor/front_end_node.cc
+  src/refactor/front_end.cc  
+)
+target_link_libraries(front_end
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+)
+
 # Range Image Projection
 add_executable(${PROJECT_NAME}_imageProjection src/imageProjection.cpp)
 add_dependencies(${PROJECT_NAME}_imageProjection ${catkin_EXPORTED_TARGETS} ${PROJECT_NAME}_generate_messages_cpp)
@@ -105,7 +114,7 @@ add_executable(${PROJECT_NAME}_imuPreintegration src/imuPreintegration.cpp)
 target_link_libraries(${PROJECT_NAME}_imuPreintegration Boost::timer ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${GTSAM_LIBRARIES})
 
 install(
-  TARGETS ${PROJECT_NAME}_imageProjection ${PROJECT_NAME}_featureExtraction ${PROJECT_NAME}_mapOptmization ${PROJECT_NAME}_imuPreintegration
+  TARGETS front_end ${PROJECT_NAME}_imageProjection ${PROJECT_NAME}_featureExtraction ${PROJECT_NAME}_mapOptmization ${PROJECT_NAME}_imuPreintegration
 	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 	ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 	RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
