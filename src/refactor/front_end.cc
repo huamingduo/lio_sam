@@ -6,9 +6,9 @@
 
 namespace lio_sam {
 
-FrontEnd::FrontEnd() : parameters_(std::make_unique<Parameters>()), nh_("~") {
+FrontEnd::FrontEnd() : parameters_(std::make_unique<Parameters>()), nh_("~"), cloud_(new pcl::PointCloud<pcl::PointXYZL>()) {
   subscribers_.push_back(nh_.subscribe<sensor_msgs::PointCloud2>("cloud", 2, &FrontEnd::HandleCloudData, this));
-  subscribers_.push_back(nh_.subscribe<sensor_msgs::Image>("depth_frame", 2, &FrontEnd::HandleDepthImageData, this));
+  subscribers_.push_back(nh_.subscribe<sensor_msgs::Image>("/ground_camera_node/depth_frame", 2, &FrontEnd::HandleDepthImageData, this));
   subscribers_.push_back(nh_.subscribe<sensor_msgs::CameraInfo>("/ground_camera_node/camera_info", 2, &FrontEnd::HandleCameraInfoData, this));
   subscribers_.push_back(nh_.subscribe<nav_msgs::Odometry>("odom", 2, &FrontEnd::HandleOdometryData, this));
   subscribers_.push_back(nh_.subscribe<sensor_msgs::Imu>("imu", 2, &FrontEnd::HandleImuData, this));
@@ -34,6 +34,11 @@ void FrontEnd::HandleCloudData(const sensor_msgs::PointCloud2ConstPtr& msg) {
 }
 
 void FrontEnd::HandleDepthImageData(const sensor_msgs::ImageConstPtr& msg) {
+  std::lock_guard<std::mutex> lock(camera_info_mutex_);
+  if (units_.empty()) {
+    return;
+  }
+
   cv_bridge::CvImagePtr cv_ptr;
   try {
     cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::TYPE_16UC1);
@@ -48,14 +53,14 @@ void FrontEnd::HandleDepthImageData(const sensor_msgs::ImageConstPtr& msg) {
   cloud_->width = image.cols;
   cloud_->height = image.rows;
   cloud_->resize(image.cols * image.rows);
-  for (int i = 0; i < image.rows; ++i) {
-    for (int j = 0; j < image.cols; ++j) {
-      const float range = static_cast<float>(image.at<int16_t>(i, j) * 0.001);
+  for (int j = 0; j < image.rows; ++j) {
+    for (int i = 0; i < image.cols; ++i) {
+      const float range = static_cast<float>(image.at<int16_t>(j, i) * 0.001);
       if (range < 0.1 || range > 5.0) {
         continue;
       }
       range_matrix_(j, i) = range;
-      const int flat_index = i * image.rows + j;
+      const int flat_index = i + j * image.cols;
       pcl::PointXYZL temp;
       temp.x = units_[flat_index].x() * range;
       temp.y = units_[flat_index].y() * range;
@@ -63,6 +68,7 @@ void FrontEnd::HandleDepthImageData(const sensor_msgs::ImageConstPtr& msg) {
       cloud_->points[flat_index] = temp;
     }
   }
+  ROS_INFO("Generate cloud with %ld points", cloud_->size());
 }
 
 void FrontEnd::HandleCameraInfoData(const sensor_msgs::CameraInfoConstPtr& msg) {
@@ -123,6 +129,17 @@ void FrontEnd::InitializeUnits(const int& width, const int& height) {
   const float fy = factor_y * camera_info_["depth"]->K[4];
   const float cx = factor_x * camera_info_["depth"]->K[2];
   const float cy = factor_y * camera_info_["depth"]->K[5];
+  ROS_INFO("Depth intrinsics: fx - %f, fy - %f, cx - %f, cy - %f", fx, fy, cx, cy);
+
+  units_.resize(parameters_->height * parameters_->width, Eigen::Vector2f::Zero());
+  for (int j = 0; j < parameters_->height; ++j) {
+    for (int i = 0; i < parameters_->width; ++i) {
+      const float x = (i - cx) / fx;
+      const float y = (j - cy) / fy;
+      units_[i + j * parameters_->width] = Eigen::Vector2f(x, y);
+    }
+  }
+  ROS_INFO("Initialized");
 }
 
 }  // namespace lio_sam

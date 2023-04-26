@@ -57,7 +57,7 @@ class FrontEnd {
 
   std::unordered_map<std::string, sensor_msgs::CameraInfoConstPtr> camera_info_;
   pcl::PointCloud<pcl::PointXYZL>::Ptr cloud_;
-  Eigen::Matrix<float, 160, 120> range_matrix_;
+  Eigen::Matrix<float, 120, 160> range_matrix_;
   std::vector<Eigen::Vector2f> units_;
 };
 
