@@ -6,7 +6,7 @@
 
 namespace lio_sam {
 
-FrontEnd::FrontEnd() : parameters_(std::make_unique<Parameters>()), nh_("~"), cloud_(new pcl::PointCloud<pcl::PointXYZL>()) {
+FrontEnd::FrontEnd() : parameters_(std::make_unique<Parameters>()), nh_("~"), cloud_(boost::make_shared<pcl::PointCloud<pcl::PointXYZL>>()) {
   subscribers_.push_back(nh_.subscribe<sensor_msgs::PointCloud2>("cloud", 2, &FrontEnd::HandleCloudData, this));
   subscribers_.push_back(nh_.subscribe<sensor_msgs::Image>("/ground_camera_node/depth_frame", 2, &FrontEnd::HandleDepthImageData, this));
   subscribers_.push_back(nh_.subscribe<sensor_msgs::CameraInfo>("/ground_camera_node/camera_info", 2, &FrontEnd::HandleCameraInfoData, this));
@@ -14,6 +14,7 @@ FrontEnd::FrontEnd() : parameters_(std::make_unique<Parameters>()), nh_("~"), cl
   subscribers_.push_back(nh_.subscribe<sensor_msgs::Imu>("imu", 2, &FrontEnd::HandleImuData, this));
   timers_.push_back(nh_.createWallTimer(ros::WallDuration(0.05), &FrontEnd::ExtractFeatures, this));
   timers_.push_back(nh_.createWallTimer(ros::WallDuration(0.05), &FrontEnd::EstimateLidarPose, this));
+  cloud_publisher_ = nh_.advertise<sensor_msgs::PointCloud2>("result", 2);
 
   auto initialization = std::thread(std::bind(&FrontEnd::InitializeUnits, this, parameters_->width, parameters_->height));
   initialization.detach();
@@ -29,13 +30,13 @@ void FrontEnd::HandleCloudData(const sensor_msgs::PointCloud2ConstPtr& msg) {
     if (range < 0.1 || range > 2.0) {
       continue;
     }
-    range_matrix_(i % 160, i / 160) = range;
   }
 }
 
 void FrontEnd::HandleDepthImageData(const sensor_msgs::ImageConstPtr& msg) {
-  std::lock_guard<std::mutex> lock(camera_info_mutex_);
-  if (units_.empty()) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto& units = units_;
+  if (units.empty()) {
     return;
   }
 
@@ -49,30 +50,35 @@ void FrontEnd::HandleDepthImageData(const sensor_msgs::ImageConstPtr& msg) {
 
   const cv::Mat& image = cv_ptr->image;
   cloud_->clear();
+  cloud_->header.stamp = msg->header.stamp.toNSec();
   cloud_->is_dense = true;
   cloud_->width = image.cols;
-  cloud_->height = image.rows;
-  cloud_->resize(image.cols * image.rows);
-  for (int j = 0; j < image.rows; ++j) {
+  cloud_->height = image.rows / parameters_->height_down_sampling_ratio;
+  cloud_->resize(cloud_->width * cloud_->height);
+  for (int j = 0, k = 0; j < image.rows; j += parameters_->height_down_sampling_ratio, ++k) {
     for (int i = 0; i < image.cols; ++i) {
       const float range = static_cast<float>(image.at<int16_t>(j, i) * 0.001);
       if (range < 0.1 || range > 5.0) {
         continue;
       }
-      range_matrix_(j, i) = range;
       const int flat_index = i + j * image.cols;
       pcl::PointXYZL temp;
-      temp.x = units_[flat_index].x() * range;
-      temp.y = units_[flat_index].y() * range;
+      temp.x = units.at(flat_index).x() * range;
+      temp.y = units.at(flat_index).y() * range;
       temp.z = range;
-      cloud_->points[flat_index] = temp;
+      cloud_->points[i + k * image.cols] = temp;
     }
   }
   ROS_INFO("Generate cloud with %ld points", cloud_->size());
+
+  sensor_msgs::PointCloud2 message;
+  pcl::toROSMsg(*cloud_, message);
+  message.header.frame_id = "camera_link";
+  cloud_publisher_.publish(message);
 }
 
 void FrontEnd::HandleCameraInfoData(const sensor_msgs::CameraInfoConstPtr& msg) {
-  std::lock_guard<std::mutex> lock(camera_info_mutex_);
+  std::lock_guard<std::mutex> lock(mutex_);
   if (camera_info_.size() == 2) {
     return;
   }
@@ -90,10 +96,41 @@ void FrontEnd::HandleOdometryData(const nav_msgs::OdometryConstPtr& msg) {}
 void FrontEnd::HandleImuData(const sensor_msgs::ImuConstPtr& msg) {}
 
 void FrontEnd::ExtractFeatures(const ros::WallTimerEvent& event) {
-  std::unique_lock<std::mutex> lock(mutex_);
-  pcl::PointCloud<pcl::PointXYZL>::Ptr surface_features;
-  pcl::PointCloud<pcl::PointXYZL>::Ptr corner_features;
-  lock.unlock();
+  static constexpr uint64_t kMinInterval = 1e7;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (cloud_->header.stamp - last_cloud_stamp_ < kMinInterval) {
+    return;
+  }
+  last_cloud_stamp_ = cloud_->header.stamp;
+
+  std::vector<Feature> features;
+  ComputeSmoothness(cloud_, features);
+
+  auto surface_features = boost::make_shared<pcl::PointCloud<pcl::PointXYZL>>();
+  surface_features->header.stamp = cloud_->header.stamp;
+  surface_features->is_dense = true;
+  surface_features->width = cloud_->width;
+  surface_features->height = cloud_->height;
+  surface_features->resize(cloud_->width * cloud_->height);
+
+  auto corner_features = boost::make_shared<pcl::PointCloud<pcl::PointXYZL>>();
+  corner_features->header.stamp = cloud_->header.stamp;
+  corner_features->is_dense = true;
+  corner_features->width = cloud_->width;
+  corner_features->height = cloud_->height;
+  corner_features->resize(cloud_->width * cloud_->height);
+
+  for (size_t j = 0; j < cloud_->height; ++j) {
+    const int start_index = parameters_->side_points_for_curvature_calculation + j * cloud_->width;
+    const int end_index = (j + 1) * cloud_->width - parameters_->side_points_for_curvature_calculation - 1;
+    for (int i = 0; i < parameters_->subregion_num; ++i) {
+      const int subregion_start_index = (start_index * (parameters_->subregion_num - i) + end_index * i) / parameters_->subregion_num;
+      const int subregion_end_index = (start_index * (parameters_->subregion_num - i - 1) + end_index * (i + 1)) / parameters_->subregion_num;
+      if (subregion_start_index >= subregion_end_index) {
+        continue;
+      }
+    }
+  }
 }
 
 void FrontEnd::EstimateLidarPose(const ros::WallTimerEvent& event) {}
@@ -102,7 +139,7 @@ void FrontEnd::InitializeUnits(const int& width, const int& height) {
   ros::Time start = ros::Time::now();
   while (ros::ok()) {
     {
-      std::lock_guard<std::mutex> lock(camera_info_mutex_);
+      std::lock_guard<std::mutex> lock(mutex_);
       if (camera_info_.size() == 2) {
         ROS_INFO("All camera info received");
         for (auto& subscriber : subscribers_) {
@@ -122,7 +159,7 @@ void FrontEnd::InitializeUnits(const int& width, const int& height) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 
-  std::lock_guard<std::mutex> lock(camera_info_mutex_);
+  std::lock_guard<std::mutex> lock(mutex_);
   const float factor_x = static_cast<float>(parameters_->width) / static_cast<float>(camera_info_["depth"]->width);
   const float factor_y = static_cast<float>(parameters_->height) / static_cast<float>(camera_info_["depth"]->height);
   const float fx = factor_x * camera_info_["depth"]->K[0];
@@ -140,6 +177,27 @@ void FrontEnd::InitializeUnits(const int& width, const int& height) {
     }
   }
   ROS_INFO("Initialized");
+}
+
+void FrontEnd::ComputeSmoothness(const pcl::PointCloud<pcl::PointXYZL>::ConstPtr& cloud, std::vector<Feature>& features) const {
+  features.clear();
+  features.resize(cloud->width * cloud->height);
+  const float num = static_cast<float>(parameters_->side_points_for_curvature_calculation) * 2.;
+  for (size_t j = 0; j < cloud->height; ++j) {
+    for (size_t i = parameters_->side_points_for_curvature_calculation; i < cloud->width - parameters_->side_points_for_curvature_calculation; ++i) {
+      const int flat_index = i + j * cloud->width;
+      float temp = num * distance(cloud->points.at(flat_index));
+      for (int offset = -parameters_->side_points_for_curvature_calculation; offset <= parameters_->side_points_for_curvature_calculation; ++offset) {
+        temp -= distance(cloud->points.at(flat_index + offset));
+      }
+      const float curvature = temp * temp;
+
+      Feature feature;
+      feature.curvature = curvature;
+      feature.index = flat_index;
+      features[flat_index] = feature;
+    }
+  }
 }
 
 }  // namespace lio_sam
