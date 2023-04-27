@@ -31,6 +31,7 @@ struct Feature {
   Type type = kUnknown;
   bool excluded = false;
   int index = -1;
+  float range = 0.;
   float curvature = -1.;
 };
 
@@ -50,7 +51,7 @@ class FrontEnd {
   void ExtractFeatures(const ros::WallTimerEvent& event);
   void EstimateLidarPose(const ros::WallTimerEvent& event);
 
-  void ComputeSmoothness(const pcl::PointCloud<pcl::PointXYZL>::ConstPtr& cloud, std::vector<Feature>& features) const;
+  void ComputeSmoothness(std::vector<std::vector<Feature>>& features) const;
 
   inline float distance(const pcl::PointXYZL& point1, const pcl::PointXYZL& point2 = pcl::PointXYZL()) const {
     const float dx = point1.x - point2.x;

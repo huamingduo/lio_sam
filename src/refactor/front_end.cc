@@ -1,6 +1,7 @@
 #include "front_end.h"
 
 #include <cv_bridge/cv_bridge.h>
+#include <pcl_conversions/pcl_conversions.h>
 
 #include <thread>
 
@@ -50,7 +51,7 @@ void FrontEnd::HandleDepthImageData(const sensor_msgs::ImageConstPtr& msg) {
 
   const cv::Mat& image = cv_ptr->image;
   cloud_->clear();
-  cloud_->header.stamp = msg->header.stamp.toNSec();
+  cloud_->header = pcl_conversions::toPCL(msg->header);
   cloud_->is_dense = true;
   cloud_->width = image.cols;
   cloud_->height = image.rows / parameters_->height_down_sampling_ratio;
@@ -96,15 +97,15 @@ void FrontEnd::HandleOdometryData(const nav_msgs::OdometryConstPtr& msg) {}
 void FrontEnd::HandleImuData(const sensor_msgs::ImuConstPtr& msg) {}
 
 void FrontEnd::ExtractFeatures(const ros::WallTimerEvent& event) {
-  static constexpr uint64_t kMinInterval = 1e7;
+  static constexpr uint64_t kTimeIntervalMicroSeconds = 1e4;
   std::lock_guard<std::mutex> lock(mutex_);
-  if (cloud_->header.stamp - last_cloud_stamp_ < kMinInterval) {
+  if (cloud_->header.stamp - last_cloud_stamp_ < kTimeIntervalMicroSeconds) {
     return;
   }
   last_cloud_stamp_ = cloud_->header.stamp;
 
-  std::vector<Feature> features;
-  ComputeSmoothness(cloud_, features);
+  std::vector<std::vector<Feature>> features;
+  ComputeSmoothness(features);
 
   auto surface_features = boost::make_shared<pcl::PointCloud<pcl::PointXYZL>>();
   surface_features->header.stamp = cloud_->header.stamp;
@@ -179,23 +180,37 @@ void FrontEnd::InitializeUnits(const int& width, const int& height) {
   ROS_INFO("Initialized");
 }
 
-void FrontEnd::ComputeSmoothness(const pcl::PointCloud<pcl::PointXYZL>::ConstPtr& cloud, std::vector<Feature>& features) const {
-  features.clear();
-  features.resize(cloud->width * cloud->height);
-  const float num = static_cast<float>(parameters_->side_points_for_curvature_calculation) * 2.;
-  for (size_t j = 0; j < cloud->height; ++j) {
-    for (size_t i = parameters_->side_points_for_curvature_calculation; i < cloud->width - parameters_->side_points_for_curvature_calculation; ++i) {
-      const int flat_index = i + j * cloud->width;
-      float temp = num * distance(cloud->points.at(flat_index));
-      for (int offset = -parameters_->side_points_for_curvature_calculation; offset <= parameters_->side_points_for_curvature_calculation; ++offset) {
-        temp -= distance(cloud->points.at(flat_index + offset));
-      }
-      const float curvature = temp * temp;
+void FrontEnd::ComputeSmoothness(std::vector<std::vector<Feature>>& features) const {
+  const int& offset = parameters_->side_points_for_curvature_calculation;
+  const float num = static_cast<float>(offset) * 2.;
 
+  features.clear();
+  features.reserve(cloud_->height);
+  for (size_t j = 0; j < cloud_->height; ++j) {
+    std::vector<Feature> features_per_row;
+    features_per_row.reserve(cloud_->width);
+    for (size_t i = 0; i < cloud_->width; ++i) {
+      const int flat_index = i + j * cloud_->width;
+      const float range = distance(cloud_->points.at(flat_index));
+      if (range < 0.1 || range > 5.0) {
+        continue;
+      }
       Feature feature;
-      feature.curvature = curvature;
       feature.index = flat_index;
-      features[flat_index] = feature;
+      feature.range = range;
+      features_per_row.push_back(feature);
+    }
+    features_per_row.resize(features_per_row.size());
+    features.push_back(features_per_row);
+  }
+
+  for (auto& feature_per_row : features) {
+    for (int i = offset; i < static_cast<int>(feature_per_row.size()) - offset; ++i) {
+      float temp = num * feature_per_row.at(i).range;
+      for (int j = -offset; j <= offset; ++j) {
+        temp -= feature_per_row.at(i + j).range;
+      }
+      feature_per_row[i].curvature = temp * temp;
     }
   }
 }
