@@ -22,8 +22,14 @@ struct Parameters {
   int height_down_sampling_ratio = 10;
   int subregion_num = 4;
   int side_points_for_curvature_calculation = 5;
+  int max_corner_feature_count_per_subregion = 20;
   float threshold_for_corner = 1.;
   float threshold_for_surface = 0.;
+};
+
+struct Smoothness {
+  int index = -1;
+  float curvature = -1.;
 };
 
 struct Feature {
@@ -51,7 +57,9 @@ class FrontEnd {
   void ExtractFeatures(const ros::WallTimerEvent& event);
   void EstimateLidarPose(const ros::WallTimerEvent& event);
 
-  void ComputeSmoothness(std::vector<std::vector<Feature>>& features) const;
+  bool ComputeSmoothness(std::vector<std::vector<Feature>>& features, std::vector<std::vector<Smoothness>>& smoothness) const;
+  bool ExtractCornerFeatures() const;
+  bool ExtractSurfaceFeatures() const;
 
   inline float distance(const pcl::PointXYZL& point1, const pcl::PointXYZL& point2 = pcl::PointXYZL()) const {
     const float dx = point1.x - point2.x;
