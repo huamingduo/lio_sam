@@ -13,7 +13,7 @@ FrontEnd::FrontEnd() : parameters_(std::make_unique<Parameters>()), nh_("~"), cl
   subscribers_.push_back(nh_.subscribe<sensor_msgs::CameraInfo>("/ground_camera_node/camera_info", 2, &FrontEnd::HandleCameraInfoData, this));
   subscribers_.push_back(nh_.subscribe<nav_msgs::Odometry>("odom", 2, &FrontEnd::HandleOdometryData, this));
   subscribers_.push_back(nh_.subscribe<sensor_msgs::Imu>("imu", 2, &FrontEnd::HandleImuData, this));
-  timers_.push_back(nh_.createWallTimer(ros::WallDuration(0.05), &FrontEnd::ExtractFeatures, this));
+  timers_.push_back(nh_.createWallTimer(ros::WallDuration(0.05), &FrontEnd::ProcessPointCloud, this));
   timers_.push_back(nh_.createWallTimer(ros::WallDuration(0.05), &FrontEnd::EstimateLidarPose, this));
   cloud_publisher_ = nh_.advertise<sensor_msgs::PointCloud2>("result", 2);
 
@@ -96,7 +96,7 @@ void FrontEnd::HandleOdometryData(const nav_msgs::OdometryConstPtr& msg) {}
 
 void FrontEnd::HandleImuData(const sensor_msgs::ImuConstPtr& msg) {}
 
-void FrontEnd::ExtractFeatures(const ros::WallTimerEvent& event) {
+void FrontEnd::ProcessPointCloud(const ros::WallTimerEvent& event) {
   static constexpr uint64_t kTimeIntervalMicroSeconds = 1e4;
   std::lock_guard<std::mutex> lock(mutex_);
   if (cloud_->header.stamp - last_cloud_stamp_ < kTimeIntervalMicroSeconds) {
@@ -105,17 +105,20 @@ void FrontEnd::ExtractFeatures(const ros::WallTimerEvent& event) {
   last_cloud_stamp_ = cloud_->header.stamp;
 
   std::vector<std::vector<Smoothness>> smoothness;
-  std::vector<std::vector<Feature>> features;
-  if (!ComputeSmoothness(smoothness, features)) {
+  std::vector<std::vector<Feature>> possible_features;
+  if (!ComputeSmoothness(smoothness, possible_features)) {
     ROS_ERROR("Failed to compute smoothness");
     return;
   }
 
   std::vector<Feature> corner_features;
-  ExtractCornerFeatures(smoothness, features, corner_features);
-
   std::vector<Feature> surface_features;
-  surface_features.reserve(cloud_->height * cloud_->width);
+  if (!ExtractFeatures(smoothness, possible_features, corner_features, surface_features)) {
+    ROS_ERROR("Failed to extract features");
+    return;
+  }
+
+  ROS_INFO("Extracted %ld corner features and %ld surface features", corner_features.size(), surface_features.size());
 }
 
 void FrontEnd::EstimateLidarPose(const ros::WallTimerEvent& event) {}
@@ -164,9 +167,9 @@ void FrontEnd::InitializeUnits(const int& width, const int& height) {
   ROS_INFO("Initialized");
 }
 
-bool FrontEnd::ComputeSmoothness(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& features) const {
-  features.clear();
-  features.reserve(cloud_->height);
+bool FrontEnd::ComputeSmoothness(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& possible_features) const {
+  possible_features.clear();
+  possible_features.reserve(cloud_->height);
   for (size_t j = 0; j < cloud_->height; ++j) {
     std::vector<Feature> features_per_row;
     features_per_row.reserve(cloud_->width);
@@ -182,14 +185,14 @@ bool FrontEnd::ComputeSmoothness(std::vector<std::vector<Smoothness>>& smoothnes
       features_per_row.push_back(feature);
     }
     features_per_row.resize(features_per_row.size());
-    features.push_back(features_per_row);
+    possible_features.push_back(features_per_row);
   }
 
   smoothness.clear();
-  smoothness.reserve(features.size());
+  smoothness.reserve(possible_features.size());
   const int& offset = parameters_->side_points_for_curvature_calculation;
   const float num = static_cast<float>(offset) * 2.;
-  for (auto& feature_per_row : features) {
+  for (auto& feature_per_row : possible_features) {
     std::vector<Smoothness> smoothness_per_row;
     smoothness_per_row.reserve(feature_per_row.size());
     for (int i = offset; i < static_cast<int>(feature_per_row.size()) - offset; ++i) {
@@ -208,15 +211,17 @@ bool FrontEnd::ComputeSmoothness(std::vector<std::vector<Smoothness>>& smoothnes
   return true;
 }
 
-bool FrontEnd::ExtractCornerFeatures(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& features,
-                                     std::vector<Feature>& corner_features) const {
+bool FrontEnd::ExtractFeatures(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& possible_features,
+                               std::vector<Feature>& corner_features, std::vector<Feature>& surface_features) const {
   auto by_smoothness = [](const Smoothness& left, const Smoothness& right) { return left.curvature < right.curvature; };
 
   corner_features.clear();
   corner_features.reserve(cloud_->height * cloud_->width);
+  surface_features.clear();
+  surface_features.reserve(cloud_->height * cloud_->width);
   for (size_t i = 0; i < smoothness.size(); ++i) {
     auto& smoothness_per_row = smoothness[i];
-    auto& features_per_row = features[i];
+    auto& features_per_row = possible_features[i];
     const int subregion_num =
         std::min(parameters_->subregion_num, static_cast<int>(smoothness_per_row.size()) / parameters_->min_points_per_subregion);
     const int index_increment = smoothness_per_row.size() / subregion_num;
@@ -246,14 +251,28 @@ bool FrontEnd::ExtractCornerFeatures(std::vector<std::vector<Smoothness>>& smoot
           features_per_row[feature_index - offset].excluded = true;
         }
       }
+
+      for (int k = start_index; k <= end_index; ++k) {
+        const int& feature_index = smoothness_per_row[k].index;
+        auto& feature = features_per_row[feature_index];
+        if (feature.excluded || feature.curvature > parameters_->threshold_for_surface) {
+          continue;
+        }
+
+        feature.type = Feature::kSurface;
+        feature.excluded = true;
+        surface_features.push_back(feature);
+
+        for (int offset = 1; offset <= parameters_->side_points_for_curvature_calculation; ++offset) {
+          features_per_row[feature_index + offset].excluded = true;
+          features_per_row[feature_index - offset].excluded = true;
+        }
+      }
     }
   }
 
-  return true;
-}
-
-bool FrontEnd::ExtractSurfaceFeatures(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& features,
-                                      std::vector<Feature>& surface_features) const {
+  corner_features.resize(corner_features.size());
+  surface_features.resize(surface_features.size());
   return true;
 }
 

@@ -55,14 +55,12 @@ class FrontEnd {
   void HandleImuData(const sensor_msgs::ImuConstPtr& msg);
   void InitializeUnits(const int& width, const int& height);
 
-  void ExtractFeatures(const ros::WallTimerEvent& event);
+  void ProcessPointCloud(const ros::WallTimerEvent& event);
   void EstimateLidarPose(const ros::WallTimerEvent& event);
 
-  bool ComputeSmoothness(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& features) const;
-  bool ExtractCornerFeatures(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& features,
-                             std::vector<Feature>& corner_features) const;
-  bool ExtractSurfaceFeatures(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& features,
-                              std::vector<Feature>& surface_features) const;
+  bool ComputeSmoothness(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& possible_features) const;
+  bool ExtractFeatures(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& possible_features,
+                       std::vector<Feature>& corner_features, std::vector<Feature>& surface_features) const;
 
   inline float distance(const pcl::PointXYZL& point1, const pcl::PointXYZL& point2 = pcl::PointXYZL()) const {
     const float dx = point1.x - point2.x;
