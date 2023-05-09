@@ -98,60 +98,24 @@ void FrontEnd::HandleImuData(const sensor_msgs::ImuConstPtr& msg) {}
 
 void FrontEnd::ExtractFeatures(const ros::WallTimerEvent& event) {
   static constexpr uint64_t kTimeIntervalMicroSeconds = 1e4;
-
-  auto feature_sort_function = [](const Feature& left, const Feature& right) { return left.curvature < right.curvature; };
-
   std::lock_guard<std::mutex> lock(mutex_);
   if (cloud_->header.stamp - last_cloud_stamp_ < kTimeIntervalMicroSeconds) {
     return;
   }
   last_cloud_stamp_ = cloud_->header.stamp;
 
-  std::vector<std::vector<Feature>> features;
   std::vector<std::vector<Smoothness>> smoothness;
-  if (!ComputeSmoothness(features, smoothness)) {
+  std::vector<std::vector<Feature>> features;
+  if (!ComputeSmoothness(smoothness, features)) {
     ROS_ERROR("Failed to compute smoothness");
     return;
   }
 
+  std::vector<Feature> corner_features;
+  ExtractCornerFeatures(smoothness, features, corner_features);
+
   std::vector<Feature> surface_features;
   surface_features.reserve(cloud_->height * cloud_->width);
-  std::vector<Feature> corner_features;
-  corner_features.reserve(cloud_->height * cloud_->width);
-
-  for (size_t j = 0; j < cloud_->height; ++j) {
-    auto& features_per_row = features.at(j);
-    const int start_index = parameters_->side_points_for_curvature_calculation + j * cloud_->width;
-    const int end_index = (j + 1) * cloud_->width - parameters_->side_points_for_curvature_calculation - 1;
-    for (int i = 0; i < parameters_->subregion_num; ++i) {
-      const int subregion_start_index = (start_index * (parameters_->subregion_num - i) + end_index * i) / parameters_->subregion_num;
-      const int subregion_end_index = (start_index * (parameters_->subregion_num - i - 1) + end_index * (i + 1)) / parameters_->subregion_num;
-      if (subregion_start_index >= subregion_end_index) {
-        continue;
-      }
-
-      std::sort(features_per_row.begin() + subregion_start_index, features_per_row.begin() + subregion_end_index, feature_sort_function);
-
-      int feature_count = 0;
-      for (int k = subregion_end_index; k >= subregion_end_index; --k) {
-        auto& feature = features_per_row.at(k);
-        if (feature.excluded || feature.curvature < parameters_->threshold_for_corner) {
-          continue;
-        }
-
-        if (++feature_count >= parameters_->max_corner_feature_count_per_subregion) {
-          break;
-        }
-
-        feature.type = Feature::kCorner;
-        feature.excluded = true;
-        corner_features.push_back(feature);
-
-        for (int l = 1; l < parameters_->side_points_for_curvature_calculation; ++l) {
-        }
-      }
-    }
-  }
 }
 
 void FrontEnd::EstimateLidarPose(const ros::WallTimerEvent& event) {}
@@ -200,7 +164,7 @@ void FrontEnd::InitializeUnits(const int& width, const int& height) {
   ROS_INFO("Initialized");
 }
 
-bool FrontEnd::ComputeSmoothness(std::vector<std::vector<Feature>>& features, std::vector<std::vector<Smoothness>>& smoothness) const {
+bool FrontEnd::ComputeSmoothness(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& features) const {
   features.clear();
   features.reserve(cloud_->height);
   for (size_t j = 0; j < cloud_->height; ++j) {
@@ -244,8 +208,53 @@ bool FrontEnd::ComputeSmoothness(std::vector<std::vector<Feature>>& features, st
   return true;
 }
 
-bool FrontEnd::ExtractCornerFeatures() const { return true; }
+bool FrontEnd::ExtractCornerFeatures(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& features,
+                                     std::vector<Feature>& corner_features) const {
+  auto by_smoothness = [](const Smoothness& left, const Smoothness& right) { return left.curvature < right.curvature; };
 
-bool FrontEnd::ExtractSurfaceFeatures() const { return true; }
+  corner_features.clear();
+  corner_features.reserve(cloud_->height * cloud_->width);
+  for (size_t i = 0; i < smoothness.size(); ++i) {
+    auto& smoothness_per_row = smoothness[i];
+    auto& features_per_row = features[i];
+    const int subregion_num =
+        std::min(parameters_->subregion_num, static_cast<int>(smoothness_per_row.size()) / parameters_->min_points_per_subregion);
+    const int index_increment = smoothness_per_row.size() / subregion_num;
+    for (int j = 0; j < subregion_num; ++j) {
+      const int start_index = j * index_increment;
+      const int end_index = (j + 1) * index_increment - 1;
+      std::sort(smoothness_per_row.begin() + start_index, smoothness_per_row.begin() + end_index, by_smoothness);
+
+      int feature_count = 0;
+      for (int k = end_index; k >= start_index; --k) {
+        const int& feature_index = smoothness_per_row[k].index;
+        auto& feature = features_per_row[feature_index];
+        if (feature.excluded || feature.curvature < parameters_->threshold_for_corner) {
+          continue;
+        }
+
+        if (++feature_count >= parameters_->max_corner_feature_count_per_subregion) {
+          break;
+        }
+
+        feature.type = Feature::kCorner;
+        feature.excluded = true;
+        corner_features.push_back(feature);
+
+        for (int offset = 1; offset <= parameters_->side_points_for_curvature_calculation; ++offset) {
+          features_per_row[feature_index + offset].excluded = true;
+          features_per_row[feature_index - offset].excluded = true;
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
+bool FrontEnd::ExtractSurfaceFeatures(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& features,
+                                      std::vector<Feature>& surface_features) const {
+  return true;
+}
 
 }  // namespace lio_sam
