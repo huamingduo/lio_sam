@@ -67,15 +67,11 @@ void FrontEnd::HandleDepthImageData(const sensor_msgs::ImageConstPtr& msg) {
       temp.x = units.at(flat_index).x() * range;
       temp.y = units.at(flat_index).y() * range;
       temp.z = range;
+      temp.label = 66;
       cloud_->points[i + k * image.cols] = temp;
     }
   }
   ROS_INFO("Generate cloud with %ld points", cloud_->size());
-
-  sensor_msgs::PointCloud2 message;
-  pcl::toROSMsg(*cloud_, message);
-  message.header.frame_id = "camera_link";
-  cloud_publisher_.publish(message);
 }
 
 void FrontEnd::HandleCameraInfoData(const sensor_msgs::CameraInfoConstPtr& msg) {
@@ -119,6 +115,19 @@ void FrontEnd::ProcessPointCloud(const ros::WallTimerEvent& event) {
   }
 
   ROS_INFO("Extracted %ld corner features and %ld surface features", corner_features.size(), surface_features.size());
+
+  for (const auto& feature : corner_features) {
+    cloud_->points[feature.index].label = 0;
+  }
+
+  for (const auto& feature : surface_features) {
+    cloud_->points[feature.index].label = 100;
+  }
+
+  sensor_msgs::PointCloud2 message;
+  pcl::toROSMsg(*cloud_, message);
+  message.header.frame_id = "camera_link";
+  cloud_publisher_.publish(message);
 }
 
 void FrontEnd::EstimateLidarPose(const ros::WallTimerEvent& event) {}
