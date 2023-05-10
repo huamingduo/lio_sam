@@ -7,7 +7,7 @@
 
 namespace lio_sam {
 
-FrontEnd::FrontEnd() : parameters_(std::make_unique<Parameters>()), nh_("~"), cloud_(boost::make_shared<pcl::PointCloud<pcl::PointXYZL>>()) {
+FrontEnd::FrontEnd() : parameters_(std::make_unique<Parameters>()), nh_("~"), cloud_(std::make_shared<pcl::PointCloud<pcl::PointXYZL>>()) {
   subscribers_.push_back(nh_.subscribe<sensor_msgs::PointCloud2>("cloud", 2, &FrontEnd::HandleCloudData, this));
   subscribers_.push_back(nh_.subscribe<sensor_msgs::Image>("/ground_camera_node/depth_frame", 2, &FrontEnd::HandleDepthImageData, this));
   subscribers_.push_back(nh_.subscribe<sensor_msgs::CameraInfo>("/ground_camera_node/camera_info", 2, &FrontEnd::HandleCameraInfoData, this));
@@ -59,7 +59,7 @@ void FrontEnd::HandleDepthImageData(const sensor_msgs::ImageConstPtr& msg) {
   for (int j = 0, k = 0; j < image.rows; j += parameters_->height_down_sampling_ratio, ++k) {
     for (int i = 0; i < image.cols; ++i) {
       const float range = static_cast<float>(image.at<int16_t>(j, i) * 0.001);
-      if (range < 0.1 || range > 5.0) {
+      if (range < 0.3 || range > 5.0) {
         continue;
       }
       const int flat_index = i + j * image.cols;
@@ -67,7 +67,7 @@ void FrontEnd::HandleDepthImageData(const sensor_msgs::ImageConstPtr& msg) {
       temp.x = units.at(flat_index).x() * range;
       temp.y = units.at(flat_index).y() * range;
       temp.z = range;
-      temp.label = 66;
+      temp.label = 160;
       cloud_->points[i + k * image.cols] = temp;
     }
   }
@@ -107,6 +107,10 @@ void FrontEnd::ProcessPointCloud(const ros::WallTimerEvent& event) {
     return;
   }
 
+  if (!ExcludeBeamPoints(possible_features)) {
+    return;
+  }
+
   std::vector<Feature> corner_features;
   std::vector<Feature> surface_features;
   if (!ExtractFeatures(smoothness, possible_features, corner_features, surface_features)) {
@@ -115,6 +119,18 @@ void FrontEnd::ProcessPointCloud(const ros::WallTimerEvent& event) {
   }
 
   ROS_INFO("Extracted %ld corner features and %ld surface features", corner_features.size(), surface_features.size());
+
+  int exclude_count = 0, feature_count = 0;
+  for (const auto& features_per_row : possible_features) {
+    feature_count += features_per_row.size();
+    for (const auto& feature : features_per_row) {
+      if (feature.excluded) {
+        cloud_->points[feature.index].label = 66;
+        ++exclude_count;
+      }
+    }
+  }
+  ROS_INFO("Excluded %d features in %d candidates", exclude_count, feature_count);
 
   for (const auto& feature : corner_features) {
     cloud_->points[feature.index].label = 0;
@@ -126,7 +142,7 @@ void FrontEnd::ProcessPointCloud(const ros::WallTimerEvent& event) {
 
   sensor_msgs::PointCloud2 message;
   pcl::toROSMsg(*cloud_, message);
-  message.header.frame_id = "camera_link";
+  message.header.frame_id = "map";
   cloud_publisher_.publish(message);
 }
 
@@ -185,7 +201,7 @@ bool FrontEnd::ComputeSmoothness(std::vector<std::vector<Smoothness>>& smoothnes
     for (size_t i = 0; i < cloud_->width; ++i) {
       const int flat_index = i + j * cloud_->width;
       const float range = distance(cloud_->points.at(flat_index));
-      if (range < 0.1 || range > 5.0) {
+      if (range < 0.3 || range > 5.0) {
         continue;
       }
       Feature feature;
@@ -194,6 +210,9 @@ bool FrontEnd::ComputeSmoothness(std::vector<std::vector<Smoothness>>& smoothnes
       features_per_row.push_back(feature);
     }
     features_per_row.resize(features_per_row.size());
+    if (features_per_row.empty()) {
+      ROS_WARN("No possible features in row %ld", j);
+    }
     possible_features.push_back(features_per_row);
   }
 
@@ -201,20 +220,48 @@ bool FrontEnd::ComputeSmoothness(std::vector<std::vector<Smoothness>>& smoothnes
   smoothness.reserve(possible_features.size());
   const int& offset = parameters_->side_points_for_curvature_calculation;
   const float num = static_cast<float>(offset) * 2.;
-  for (auto& feature_per_row : possible_features) {
+  for (auto& features_per_row : possible_features) {
     std::vector<Smoothness> smoothness_per_row;
-    smoothness_per_row.reserve(feature_per_row.size());
-    for (int i = offset; i < static_cast<int>(feature_per_row.size()) - offset; ++i) {
-      auto& feature = feature_per_row[i];
+    smoothness_per_row.reserve(features_per_row.size());
+    for (int i = offset; i < static_cast<int>(features_per_row.size()) - offset; ++i) {
+      auto& feature = features_per_row[i];
       float temp = num * feature.range;
       for (int j = -offset; j <= offset; ++j) {
-        temp -= feature_per_row.at(i + j).range;
+        temp -= features_per_row.at(i + j).range;
       }
       feature.curvature = temp * temp;
       smoothness_per_row.push_back({i, feature.curvature});
     }
     smoothness_per_row.resize(smoothness_per_row.size());
     smoothness.push_back(smoothness_per_row);
+  }
+
+  return true;
+}
+
+bool FrontEnd::ExcludeBeamPoints(std::vector<std::vector<Feature>>& possible_features) const {
+  const int& offset = parameters_->side_points_for_curvature_calculation;
+  for (auto& features_per_row : possible_features) {
+    for (int i = offset; i < static_cast<int>(features_per_row.size()) - offset - 1; ++i) {
+      const float depth0 = features_per_row[i - 1].range;
+      const float depth1 = features_per_row[i].range;
+      const float depth2 = features_per_row[i + 1].range;
+      const float diff1 = depth0 - depth1;
+      const float diff2 = depth1 - depth2;
+      if (diff2 > 0.1) {
+        for (int j = 1; j <= offset; ++j) {
+          features_per_row[i - j].excluded = true;
+        }
+      } else if (diff2 < -0.1) {
+        for (int j = 1; j <= offset + 1; ++j) {
+          features_per_row[i + j].excluded = true;
+        }
+      }
+
+      if (std::abs(diff1) > 0.02 * depth1 && std::abs(diff2) > 0.02 * depth1) {
+        features_per_row[i].excluded = true;
+      }
+    }
   }
 
   return true;
@@ -231,6 +278,9 @@ bool FrontEnd::ExtractFeatures(std::vector<std::vector<Smoothness>>& smoothness,
   for (size_t i = 0; i < smoothness.size(); ++i) {
     auto& smoothness_per_row = smoothness[i];
     auto& features_per_row = possible_features[i];
+    if (smoothness_per_row.empty() || features_per_row.empty()) {
+      continue;
+    }
     const int subregion_num =
         std::min(parameters_->subregion_num, static_cast<int>(smoothness_per_row.size()) / parameters_->min_points_per_subregion);
     const int index_increment = smoothness_per_row.size() / subregion_num;

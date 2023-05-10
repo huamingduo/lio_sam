@@ -23,8 +23,8 @@ struct Parameters {
   int subregion_num = 4;
   int side_points_for_curvature_calculation = 5;
   int min_points_per_subregion = 11;
-  int max_corner_feature_count_per_subregion = 20;
-  float threshold_for_corner = 1.;
+  int max_corner_feature_count_per_subregion = 0;
+  float threshold_for_corner = 100.;
   float threshold_for_surface = 0.;
 };
 
@@ -59,6 +59,7 @@ class FrontEnd {
   void EstimateLidarPose(const ros::WallTimerEvent& event);
 
   bool ComputeSmoothness(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& possible_features) const;
+  bool ExcludeBeamPoints(std::vector<std::vector<Feature>>& possible_features) const;
   bool ExtractFeatures(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& possible_features,
                        std::vector<Feature>& corner_features, std::vector<Feature>& surface_features) const;
 
