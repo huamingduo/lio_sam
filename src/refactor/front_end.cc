@@ -16,6 +16,7 @@ FrontEnd::FrontEnd() : parameters_(std::make_unique<Parameters>()), nh_("~"), cl
   timers_.push_back(nh_.createWallTimer(ros::WallDuration(0.05), &FrontEnd::ProcessPointCloud, this));
   timers_.push_back(nh_.createWallTimer(ros::WallDuration(0.05), &FrontEnd::EstimateLidarPose, this));
   cloud_publisher_ = nh_.advertise<sensor_msgs::PointCloud2>("result", 2);
+  ranges_publisher_ = nh_.advertise<sensor_msgs::PointCloud2>("ranges", 2);
 
   auto initialization = std::thread(std::bind(&FrontEnd::InitializeUnits, this, parameters_->width, parameters_->height));
   initialization.detach();
@@ -111,6 +112,26 @@ void FrontEnd::ProcessPointCloud(const ros::WallTimerEvent& event) {
     return;
   }
 
+  pcl::PointCloud<pcl::PointXYZL> ranges;
+  ranges.is_dense = true;
+  ranges.width = cloud_->width;
+  ranges.height = cloud_->height;
+  ranges.resize(cloud_->width * cloud_->height);
+  for (int i = 0; i < possible_features.size(); ++i) {
+    const auto& features_per_row = possible_features.at(i);
+    for (int j = 0; j < features_per_row.size(); ++j) {
+      const auto& feature = features_per_row[j];
+      auto point = cloud_->points[feature.index];
+      point.z = feature.range;
+      point.label = feature.excluded ? 0 : 255;
+      ranges.points[feature.index] = point;
+    }
+  }
+  sensor_msgs::PointCloud2 debug;
+  pcl::toROSMsg(ranges, debug);
+  debug.header.frame_id = "map";
+  ranges_publisher_.publish(debug);
+
   std::vector<Feature> corner_features;
   std::vector<Feature> surface_features;
   if (!ExtractFeatures(smoothness, possible_features, corner_features, surface_features)) {
@@ -200,7 +221,7 @@ bool FrontEnd::ComputeSmoothness(std::vector<std::vector<Smoothness>>& smoothnes
     features_per_row.reserve(cloud_->width);
     for (size_t i = 0; i < cloud_->width; ++i) {
       const int flat_index = i + j * cloud_->width;
-      const float range = distance(cloud_->points.at(flat_index));
+      const float& range = cloud_->points.at(flat_index);
       if (range < 0.3 || range > 5.0) {
         continue;
       }
@@ -227,6 +248,9 @@ bool FrontEnd::ComputeSmoothness(std::vector<std::vector<Smoothness>>& smoothnes
       auto& feature = features_per_row[i];
       float temp = num * feature.range;
       for (int j = -offset; j <= offset; ++j) {
+        if (j == 0) {
+          continue;
+        }
         temp -= features_per_row.at(i + j).range;
       }
       feature.curvature = temp * temp;
@@ -249,7 +273,7 @@ bool FrontEnd::ExcludeBeamPoints(std::vector<std::vector<Feature>>& possible_fea
       const float diff1 = depth0 - depth1;
       const float diff2 = depth1 - depth2;
       if (diff2 > 0.1) {
-        for (int j = 1; j <= offset; ++j) {
+        for (int j = 0; j <= offset; ++j) {
           features_per_row[i - j].excluded = true;
         }
       } else if (diff2 < -0.1) {
@@ -269,6 +293,7 @@ bool FrontEnd::ExcludeBeamPoints(std::vector<std::vector<Feature>>& possible_fea
 
 bool FrontEnd::ExtractFeatures(std::vector<std::vector<Smoothness>>& smoothness, std::vector<std::vector<Feature>>& possible_features,
                                std::vector<Feature>& corner_features, std::vector<Feature>& surface_features) const {
+  const int min_points_per_subregion = parameters_->side_points_for_curvature_calculation * 2 + 1;
   auto by_smoothness = [](const Smoothness& left, const Smoothness& right) { return left.curvature < right.curvature; };
 
   corner_features.clear();
@@ -281,8 +306,7 @@ bool FrontEnd::ExtractFeatures(std::vector<std::vector<Smoothness>>& smoothness,
     if (smoothness_per_row.empty() || features_per_row.empty()) {
       continue;
     }
-    const int subregion_num =
-        std::min(parameters_->subregion_num, static_cast<int>(smoothness_per_row.size()) / parameters_->min_points_per_subregion);
+    const int subregion_num = std::min(parameters_->subregion_num, static_cast<int>(smoothness_per_row.size()) / min_points_per_subregion);
     const int index_increment = smoothness_per_row.size() / subregion_num;
     for (int j = 0; j < subregion_num; ++j) {
       const int start_index = j * index_increment;

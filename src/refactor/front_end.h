@@ -22,7 +22,6 @@ struct Parameters {
   int height_down_sampling_ratio = 10;
   int subregion_num = 4;
   int side_points_for_curvature_calculation = 5;
-  int min_points_per_subregion = 11;
   int max_corner_feature_count_per_subregion = 0;
   float threshold_for_corner = 100.;
   float threshold_for_surface = 0.;
@@ -79,6 +78,7 @@ class FrontEnd {
   std::vector<ros::Subscriber> subscribers_;
   std::vector<ros::WallTimer> timers_;
   ros::Publisher cloud_publisher_;
+  ros::Publisher ranges_publisher_;
 
   std::mutex mutex_;
   std::unordered_map<std::string, sensor_msgs::CameraInfoConstPtr> camera_info_;
