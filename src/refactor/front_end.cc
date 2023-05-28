@@ -221,7 +221,7 @@ bool FrontEnd::ComputeSmoothness(std::vector<std::vector<Smoothness>>& smoothnes
     features_per_row.reserve(cloud_->width);
     for (size_t i = 0; i < cloud_->width; ++i) {
       const int flat_index = i + j * cloud_->width;
-      const float& range = cloud_->points.at(flat_index);
+      const float& range = cloud_->points.at(flat_index).z;
       if (range < 0.3 || range > 5.0) {
         continue;
       }
@@ -272,19 +272,15 @@ bool FrontEnd::ExcludeBeamPoints(std::vector<std::vector<Feature>>& possible_fea
       const float depth2 = features_per_row[i + 1].range;
       const float diff1 = depth0 - depth1;
       const float diff2 = depth1 - depth2;
-      if (diff2 > 0.1) {
-        for (int j = 0; j <= offset; ++j) {
-          features_per_row[i - j].excluded = true;
-        }
-      } else if (diff2 < -0.1) {
-        for (int j = 1; j <= offset + 1; ++j) {
+      if (std::abs(features_per_row[i].index - features_per_row[i + 1].index) < 10 && std::abs(diff2) > 0.03) {
+        for (int j = -offset; j <= offset + 1; ++j) {
           features_per_row[i + j].excluded = true;
         }
       }
 
-      if (std::abs(diff1) > 0.02 * depth1 && std::abs(diff2) > 0.02 * depth1) {
-        features_per_row[i].excluded = true;
-      }
+      // if (std::abs(diff1) > 0.02 * depth1 && std::abs(diff2) > 0.02 * depth1) {
+      //   features_per_row[i].excluded = true;
+      // }
     }
   }
 
